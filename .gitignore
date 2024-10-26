@@ -4,3 +4,5 @@ node_modules/
 .env
 postgres-data
 migrations
+
+.DS_Store
