@@ -33,6 +33,7 @@ const apiRoutes = app
 
 // Error handling
 app.onError((err, c) => {
+  // #TODO : handle and prettify zod error
   if (err instanceof ZodError) {
     return c.json<ErrorResponse>({
       success: false,
