@@ -1,5 +1,5 @@
 import { Context } from "hono";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { generateToken } from "~/utils/jwt";
 import { hashPassword, verifyPassword } from "~/utils/password";
@@ -12,6 +12,15 @@ import {
   userLoginValidation,
   userSignUpValidation,
 } from "~/validations/user";
+
+import { generateState, generateCodeVerifier, decodeIdToken, Google } from "arctic";
+
+// Initialize Google OAuth client
+const google = new Google(
+  process.env.GOOGLE_CLIENT_ID!,
+  process.env.GOOGLE_CLIENT_SECRET!,
+  process.env.GOOGLE_REDIRECT_URI!
+);
 
 export async function signup(c: Context) {
   const parsedBody = await userSignUpValidation.safeParseAsync(
@@ -26,6 +35,13 @@ export async function signup(c: Context) {
   }
 
   const { email, password, fullName } = parsedBody.data;
+
+  if (!email || !password || !fullName) {
+    return c.json<ErrorResponse>(
+      { success: false, error: "All fields are required" },
+      400
+    );
+  }
 
   const existingUser = await db
     .select()
@@ -75,7 +91,8 @@ export async function login(c: Context) {
     .from(users)
     .where(eq(users.email, email))
     .limit(1);
-  if (!user) {
+
+  if (!user || !user.password) {
     return c.json<ErrorResponse>(
       { success: false, error: "Invalid credentials" },
       401
@@ -143,7 +160,8 @@ export async function forgotPassword(c: Context) {
     .from(users)
     .where(eq(users.email, email))
     .limit(1);
-  if (!user) {
+
+  if (!user || !user.password) {
     return c.json<SuccessResponse>({
       message: "If the email exists, a reset link will be sent",
       success: true,
@@ -197,4 +215,155 @@ export async function resetPassword(c: Context) {
     success: true,
     message: "Password reset successfully",
   });
+}
+
+// OAuth
+export async function oAuth(c: Context) {
+  const provider = c.req.param("provider");
+
+  if (provider !== "google") {
+    return c.json<ErrorResponse>(
+      { success: false, error: "Unsupported provider" },
+      400
+    );
+  }
+
+  const state = generateState();
+  const codeVerifier = generateCodeVerifier();
+
+  // Store these in session/cookie for validation during callback
+  c.set("oauth_state", state);
+  c.set("oauth_code_verifier", codeVerifier);
+
+  const url = google.createAuthorizationURL(
+    state,
+    codeVerifier,
+    ["openid", "profile", "email"],
+  );
+  url.searchParams.set("access_type", "offline");
+
+  return c.redirect(String(url));
+
+  // return c.json<SuccessResponse<{url : string}>>({
+  //   success: true,
+  //   data: { url: String(url) },
+  //   message: "OAuth login successful",
+  // });
+}
+
+export async function oAuthCallback(c: Context) {
+  const provider = c.req.param("provider");
+  const { code } = c.req.query();
+
+  if (provider !== "google") {
+    return c.json<ErrorResponse>(
+      { success: false, error: "Unsupported provider" },
+      400
+    );
+  }
+
+  try {
+    const storedCodeVerifier = c.get("oauth_code_verifier");
+    const tokens = await google.validateAuthorizationCode(code, storedCodeVerifier);
+
+    const idToken = tokens.idToken();
+
+    interface Claims {
+      iss: string;
+      azp: string;
+      aud: string;
+      sub: string;
+      at_hash: string;
+      hd: string;
+      email: string;
+      email_verified: string;
+      iat: number;
+      exp: number;
+      nonce: string;
+      name: string; //  will be provided when: The request scope included the string "profile"
+    }
+
+    const claims = decodeIdToken(idToken) as Claims;
+
+    // First try to find user by OAuth provider and ID
+    let [user] = await db
+      .select()
+      .from(users)
+      .where(
+        and(
+          eq(users.oAuthProvider, provider),
+          eq(users.oAuthId, claims.sub)
+        )
+      )
+      .limit(1);
+
+    if (!user) {
+      // If not found by OAuth, try to find by email
+      [user] = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, claims.email))
+        .limit(1);
+
+      if (user) {
+        // If user exists with email but no OAuth, link the accounts
+        await db
+          .update(users)
+          .set({
+            oAuthProvider: provider,
+            oAuthId: claims.sub,
+            oAuthAccessToken: tokens.accessToken(),
+            oAuthRefreshToken: tokens.hasRefreshToken() ? tokens.refreshToken() : null,
+            oAuthTokenExpiresAt: tokens.accessTokenExpiresAt(),
+            isVerified: true, // Mark as verified since OAuth email is verified
+          })
+          .where(eq(users.id, user.id));
+      } else {
+        // Create new user
+        const [newUser] = await db
+          .insert(users)
+          .values({
+            email: claims.email,
+            fullName: claims.name,
+            isVerified: true,
+            oAuthProvider: provider,
+            oAuthId: claims.sub,
+            oAuthAccessToken: tokens.accessToken(),
+            oAuthRefreshToken: tokens.hasRefreshToken() ? tokens.refreshToken() : null,
+            oAuthTokenExpiresAt: tokens.accessTokenExpiresAt(),
+          })
+          .returning();
+        user = newUser;
+      }
+    } else {
+      // Update existing OAuth user's tokens
+      await db
+        .update(users)
+        .set({
+          oAuthAccessToken: tokens.accessToken(),
+          oAuthRefreshToken: tokens.hasRefreshToken() ? tokens.refreshToken() : null,
+          oAuthTokenExpiresAt: tokens.accessTokenExpiresAt(),
+        })
+        .where(eq(users.id, user.id));
+    }
+
+    // Generate JWT token
+    const jwtToken = await generateToken({
+      userId: user.id,
+      email: user.email,
+    });
+
+    return c.json<SuccessResponse<{ token: string }>>({
+      success: true,
+      data: { token: jwtToken },
+      message: "OAuth login successful",
+    });
+
+  } catch (error) {
+    console.error("OAuth error:", error);
+    return c.json<ErrorResponse>(
+      { success: false, error: "Authentication failed" },
+      401
+    );
+  }
 }

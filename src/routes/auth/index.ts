@@ -8,6 +8,8 @@ const apiRoutes = app
   .post("/login", authController.login)
   .get("/verify-email", authController.verifyEmail)
   .post("/forgot-password", authController.forgotPassword)
-  .post("/reset-password", authController.resetPassword);
+  .post("/reset-password", authController.resetPassword)
+  .post("/o-auth/:provider", authController.oAuth)
+  .get("/o-auth/:provider/callback", authController.oAuthCallback);
 
 export default apiRoutes;

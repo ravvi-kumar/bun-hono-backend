@@ -13,17 +13,23 @@ export const users = pgTable(
   {
     id: uuid("id").unique().notNull().primaryKey().defaultRandom(),
     email: varchar("email").notNull().unique(),
-    password: varchar("password").notNull(),
+    password: varchar("password"),
     fullName: varchar("full_name"),
     isVerified: boolean("is_verified").default(false),
     verificationToken: varchar("verification_token"),
     resetPasswordToken: varchar("reset_password_token"),
+    oAuthProvider: varchar("oauth_provider"),
+    oAuthId: varchar("oauth_id"),
+    oAuthAccessToken: text("oauth_access_token"),
+    oAuthRefreshToken: text("oauth_refresh_token"),
+    oAuthTokenExpiresAt: timestamp("oauth_token_expires_at"),
     createdAt: timestamp("created_at").defaultNow(),
     updatedAt: timestamp("updated_at").defaultNow(),
   },
   (table) => {
     return {
       emailIndex: uniqueIndex("emailIndex").on(table.email),
+      oAuthIndex: uniqueIndex("oAuthIndex").on(table.oAuthProvider, table.oAuthId),
     };
   }
 );
