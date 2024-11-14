@@ -15,6 +15,6 @@ export async function authMiddleware(c: Context, next: Next) {
     return c.json({ message: "Invalid token" }, 401);
   }
 
-  c.set("user", payload);
+  c.set("user", payload?.data);
   await next();
 }
