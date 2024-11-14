@@ -1,4 +1,5 @@
 import { Context } from "hono";
+import { getSignedCookie, setSignedCookie } from "hono/cookie";
 import { eq, and } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { generateToken } from "~/utils/jwt";
@@ -232,8 +233,8 @@ export async function oAuth(c: Context) {
   const codeVerifier = generateCodeVerifier();
 
   // Store these in session/cookie for validation during callback
-  c.set("oauth_state", state);
-  c.set("oauth_code_verifier", codeVerifier);
+  setSignedCookie(c, "oauth_state", state, process.env.COOKIE_SECRET!);
+  setSignedCookie(c, "oauth_code_verifier", codeVerifier, process.env.COOKIE_SECRET!);
 
   const url = google.createAuthorizationURL(
     state,
@@ -263,7 +264,13 @@ export async function oAuthCallback(c: Context) {
   }
 
   try {
-    const storedCodeVerifier = c.get("oauth_code_verifier");
+    const storedCodeVerifier = await getSignedCookie(c, "oauth_code_verifier", process.env.COOKIE_SECRET!);
+    if (!storedCodeVerifier) {
+      return c.json<ErrorResponse>(
+        { success: false, error: "Invalid code verifier" },
+        400
+      );
+    }
     const tokens = await google.validateAuthorizationCode(code, storedCodeVerifier);
 
     const idToken = tokens.idToken();
