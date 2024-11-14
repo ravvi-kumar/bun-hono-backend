@@ -1,12 +1,11 @@
+import { and, eq } from "drizzle-orm";
 import { Context } from "hono";
-import { getSignedCookie, setSignedCookie } from "hono/cookie";
-import { eq, and } from "drizzle-orm";
 import { nanoid } from "nanoid";
-import { generateToken } from "~/utils/jwt";
-import { hashPassword, verifyPassword } from "~/utils/password";
-import { sendVerificationEmail, sendPasswordResetEmail } from "~/utils/email";
 import { db } from "~/db";
 import { users } from "~/db/schema";
+import { sendPasswordResetEmail, sendVerificationEmail } from "~/utils/email";
+import { generateToken } from "~/utils/jwt";
+import { hashPassword, verifyPassword } from "~/utils/password";
 import { ErrorResponse, SuccessResponse } from "~/utils/response.type";
 import {
   passwordValidation,
@@ -14,7 +13,7 @@ import {
   userSignUpValidation,
 } from "~/validations/user";
 
-import { generateState, generateCodeVerifier, decodeIdToken, Google } from "arctic";
+import { decodeIdToken, generateCodeVerifier, generateState, Google } from "arctic";
 
 // Initialize Google OAuth client
 const google = new Google(
@@ -232,10 +231,6 @@ export async function oAuth(c: Context) {
   const state = generateState();
   const codeVerifier = generateCodeVerifier();
 
-  // Store these in session/cookie for validation during callback
-  setSignedCookie(c, "oauth_state", state, process.env.COOKIE_SECRET!);
-  setSignedCookie(c, "oauth_code_verifier", codeVerifier, process.env.COOKIE_SECRET!);
-
   const url = google.createAuthorizationURL(
     state,
     codeVerifier,
@@ -243,18 +238,23 @@ export async function oAuth(c: Context) {
   );
   url.searchParams.set("access_type", "offline");
 
-  return c.redirect(String(url));
-
-  // return c.json<SuccessResponse<{url : string}>>({
-  //   success: true,
-  //   data: { url: String(url) },
-  //   message: "OAuth login successful",
-  // });
+  return c.json<SuccessResponse<{url : string, state: string, codeVerifier: string}>>({
+    success: true,
+    data: { url: String(url), state, codeVerifier },
+    message: "OAuth login successful",
+  });
 }
 
 export async function oAuthCallback(c: Context) {
   const provider = c.req.param("provider");
-  const { code } = c.req.query();
+  const { code, codeVerifier } = c.req.query();
+
+  if (!code || !codeVerifier) {
+    return c.json<ErrorResponse>(
+      { success: false, error: "Missing code or code verifier" },
+      400
+    );
+  }
 
   if (provider !== "google") {
     return c.json<ErrorResponse>(
@@ -264,14 +264,7 @@ export async function oAuthCallback(c: Context) {
   }
 
   try {
-    const storedCodeVerifier = await getSignedCookie(c, "oauth_code_verifier", process.env.COOKIE_SECRET!);
-    if (!storedCodeVerifier) {
-      return c.json<ErrorResponse>(
-        { success: false, error: "Invalid code verifier" },
-        400
-      );
-    }
-    const tokens = await google.validateAuthorizationCode(code, storedCodeVerifier);
+    const tokens = await google.validateAuthorizationCode(code, codeVerifier);
 
     const idToken = tokens.idToken();
 
